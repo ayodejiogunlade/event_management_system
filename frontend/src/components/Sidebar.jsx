@@ -1,0 +1,66 @@
+import { useNavigate, useLocation } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import {
+  LayoutDashboard, Calendar, Users, ShoppingBag,
+  Bell, Map, LogOut, Settings, Shield
+} from 'lucide-react';
+
+const navByRole = {
+  organizer: [
+    { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { path: '/events', label: 'My Events', icon: Calendar },
+    { path: '/discover', label: 'Find Vendors', icon: Map },
+    { path: '/bookings', label: 'Bookings', icon: ShoppingBag },
+  ],
+  vendor: [
+    { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { path: '/vendor-profile', label: 'My Profile', icon: Users },
+    { path: '/bookings', label: 'Booking Requests', icon: ShoppingBag },
+  ],
+  admin: [
+    { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { path: '/admin/users', label: 'Users', icon: Users },
+    { path: '/admin/vendors', label: 'Vendors', icon: Shield },
+    { path: '/events', label: 'All Events', icon: Calendar },
+    { path: '/bookings', label: 'All Bookings', icon: ShoppingBag },
+  ],
+};
+
+export default function Sidebar() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const items = navByRole[user?.user_type] || [];
+
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-logo">
+        <h1>⚡ EMS</h1>
+        <span>Event Management</span>
+      </div>
+
+      <nav className="sidebar-nav">
+        {items.map(({ path, label, icon: Icon }) => (
+          <button
+            key={path}
+            className={`nav-item ${pathname.startsWith(path) ? 'active' : ''}`}
+            onClick={() => navigate(path)}
+          >
+            <Icon size={16} />
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="sidebar-footer">
+        <div style={{ color: 'rgba(255,255,255,.5)', fontSize: 12, marginBottom: 8 }}>
+          {user?.name}<br />
+          <span style={{ textTransform: 'capitalize', color: 'rgba(255,255,255,.35)' }}>{user?.user_type}</span>
+        </div>
+        <button className="nav-item" onClick={logout} style={{ padding: '8px 0', color: 'rgba(255,255,255,.5)' }}>
+          <LogOut size={15} /> Sign out
+        </button>
+      </div>
+    </aside>
+  );
+}
