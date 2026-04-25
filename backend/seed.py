@@ -5,20 +5,14 @@ Run once after first startup to seed demo data:
 import sys
 sys.path.insert(0, "/app")
 
-import bcrypt
 from app.database import SessionLocal, engine
 from app.models import Base, User, Vendor, Location, Event, UserType
+from app.auth import hash_password
 from datetime import datetime, timedelta
+import random
 
 Base.metadata.create_all(bind=engine)
 db = SessionLocal()
-
-# ── Direct Password Hashing (Bypassing broken passlib in app.auth) ────────────
-def hash_password(password: str) -> str:
-    pwd_bytes = password.encode('utf-8')
-    salt = bcrypt.gensalt()
-    hashed_password = bcrypt.hashpw(pwd_bytes, salt)
-    return hashed_password.decode('utf-8')
 
 def make_user(name, email, pw, role):
     u = db.query(User).filter(User.email == email).first()
