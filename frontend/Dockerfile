@@ -2,15 +2,9 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --legacy-peer-deps --loglevel=error
+RUN npm install
 
 COPY . .
-
-# CI=false: prevents warnings from failing the build
-# GENERATE_SOURCEMAP=false: significantly speeds up the build
-ENV CI=false
-ENV GENERATE_SOURCEMAP=false
-
 RUN npm run build
 
 FROM nginx:alpine

@@ -1,14 +1,13 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { Toaster } from 'react-hot-toast';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import AuthPage from './pages/AuthPage';
-import Dashboard from './pages/Dashboard';
-import Events from './pages/Events';
-import Discover from './pages/Discover';
-import Bookings from './pages/Bookings';
-import VendorProfile from './pages/VendorProfile';
-import { AdminUsers, AdminVendors } from './pages/Admin';
-import './index.css';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { Toaster } from 'react-hot-toast'
+import { AuthProvider, useAuth } from './context/AuthContext'
+import AuthPage from './pages/AuthPage'
+import Dashboard from './pages/Dashboard'
+import Events from './pages/Events'
+import Discover from './pages/Discover'
+import Bookings from './pages/Bookings'
+import VendorProfile from './pages/VendorProfile'
+import { AdminUsers, AdminVendors } from './pages/Admin'
 
 function Protected({ children, roles }) {
   const { user } = useAuth();
