@@ -8,35 +8,20 @@ from app.routers.auth import router as auth_router
 from app.routers.events import router as events_router
 from app.routers.vendors import router as vendors_router
 from app.routers.bookings import router as bookings_router
-from app.routers.misc import matching_router, notif_router, admin_router
+from app.routers.misc import (planner_router, matching_router,
+                               notif_router, admin_router, meta_router)
 
-# Create all tables
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Event Management System API", version="1.0.0")
+app = FastAPI(title="EMS API", version="3.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include routers
-app.include_router(auth_router)
-app.include_router(events_router)
-app.include_router(vendors_router)
-app.include_router(bookings_router)
-app.include_router(matching_router)
-app.include_router(notif_router)
-app.include_router(admin_router)
-
+for r in [auth_router, events_router, vendors_router, bookings_router,
+          planner_router, matching_router, notif_router, admin_router, meta_router]:
+    app.include_router(r)
 
 @app.get("/api/health")
-def health():
-    return {"status": "ok", "service": "EMS API"}
+def health(): return {"status": "ok", "version": "3.0"}
 
-
-# Wrap with Socket.IO ASGI app
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
