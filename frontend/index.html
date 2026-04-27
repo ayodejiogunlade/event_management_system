@@ -5,36 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>EMS – Event Management System</title>
     <meta name="description" content="Real-time event planning and vendor matching platform" />
+
     <!--
-      GOOGLE MAPS PLACES API
-      ─────────────────────────────────────────────────────────────────────────
-      To enable address autocomplete and auto-populate lat/lng:
+      ═══════════════════════════════════════════════════════════════════════
+      GEOCODING & ADDRESS SEARCH — 100% Free, No API Key Required
+      ═══════════════════════════════════════════════════════════════════════
+      This application uses FREE, open-source geocoding services only:
 
-      1. Go to https://console.cloud.google.com/apis/library
-      2. Enable: "Places API" and "Maps JavaScript API"
-      3. Create an API key, restrict it to your domain
-      4. Replace YOUR_GOOGLE_MAPS_API_KEY below with your actual key
+      ┌─ Photon (https://photon.komoot.io) ──────────────────────────────┐
+      │  "Search as you type" address suggestions.                        │
+      │  Powered by OpenStreetMap data. Zero cost. No signup.             │
+      └───────────────────────────────────────────────────────────────────┘
 
-      Without a key, the app still works — users can type addresses manually
-      and set coordinates via the map picker or lat/lng fields.
-      ─────────────────────────────────────────────────────────────────────────
+      ┌─ Nominatim (https://nominatim.openstreetmap.org) ────────────────┐
+      │  Reverse geocoding — GPS coordinates → human-readable address.   │
+      │  Used when the user clicks "Use My Location". Free & open-source. │
+      └───────────────────────────────────────────────────────────────────┘
+
+      ┌─ Browser Geolocation API (navigator.geolocation) ────────────────┐
+      │  Reads the device GPS / location service.                         │
+      │  The browser automatically asks the user for permission.          │
+      │  Works on desktop (IP-based) and mobile (GPS).                    │
+      └───────────────────────────────────────────────────────────────────┘
+
+      No setup, no configuration, no billing. Works out of the box.
+      ═══════════════════════════════════════════════════════════════════════
     -->
-    <script>
-      // Replace with your real key. When blank, autocomplete is disabled gracefully.
-      window.GOOGLE_MAPS_API_KEY = 'YOUR_GOOGLE_MAPS_API_KEY';
-    </script>
-    <script>
-      // Only load Google Maps if a real key is set
-      (function() {
-        var key = window.GOOGLE_MAPS_API_KEY;
-        if (key && key !== 'YOUR_GOOGLE_MAPS_API_KEY') {
-          var s = document.createElement('script');
-          s.src = 'https://maps.googleapis.com/maps/api/js?key=' + key + '&libraries=places&loading=async';
-          s.async = true; s.defer = true;
-          document.head.appendChild(s);
-        }
-      })();
-    </script>
   </head>
   <body>
     <div id="root"></div>
