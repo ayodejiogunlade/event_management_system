@@ -1,7 +1,7 @@
 import socketio
 from typing import Dict, Set
 
-# in-memory map of user_id -> set of socket IDs
+# In-memory map of user_id -> set of socket IDs
 connected_users: Dict[int, Set[str]] = {}
 
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")

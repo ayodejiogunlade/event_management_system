@@ -1,79 +1,88 @@
-import sys; sys.path.insert(0, "/app")
+"""
+seed.py — Demo Data Seeder
+
+Run once after first docker-compose up:
+    docker compose exec backend python seed.py
+
+Creates demo accounts, service categories, pricing models, vendors, and events.
+"""
+
+import sys
+sys.path.insert(0, "/app")
+
 from app.database import SessionLocal, engine
 from app.models import (Base, User, Vendor, VendorService, Location, Event,
                          UserType, ServiceCategoryDef, PricingModelDef, SystemSetting)
 from app.auth import hash_password
 from datetime import datetime
+
 Base.metadata.create_all(bind=engine)
 db = SessionLocal()
 
 # ── Pricing models ────────────────────────────────────────────────────────────
 pm_data = [
-    ("fixed_fee",  "Fixed Fee / Package",    "A flat rate for a defined scope of work.", [
-        {"name":"capacity","label":"Hall Capacity","type":"number","placeholder":"500","unit":"people"},
-        {"name":"hall_type","label":"Hall Type","type":"select","options":["Indoor","Outdoor","Rooftop","Marquee"]},
-    ]),
-    ("per_head",   "Per Head (Per Guest)",   "Billed per attendee — ideal for catering & bar services.", None),
-    ("percentage", "Percentage of Budget",   "% of total event budget — common for event planners.", None),
-    ("hourly",     "Hourly / Day Rate",       "Charged per hour or as a day rate — for DJs, MCs, photographers.", None),
+    ("fixed_fee",  "Fixed Fee / Package",   "A flat rate for a defined scope of work."),
+    ("per_head",   "Per Head (Per Guest)",  "Billed per attendee — ideal for catering & bar services."),
+    ("percentage", "Percentage of Budget",  "% of total event budget — common for event planners."),
+    ("hourly",     "Hourly / Day Rate",      "Charged per hour or as a day rate — for DJs, MCs, photographers."),
 ]
-for key, label, desc, _ in pm_data:
+for key, label, desc in pm_data:
     if not db.query(PricingModelDef).filter_by(key=key).first():
         db.add(PricingModelDef(key=key, label=label, description=desc))
 db.commit()
 
-# ── Service categories (from PDF) ─────────────────────────────────────────────
+# ── Service categories ────────────────────────────────────────────────────────
 cat_data = [
-    ("event_planning",   "Event Planning & Production", "👑", 0,
+    ("event_planning",    "Event Planning & Production", "👑", 0,
      [{"name":"event_types","label":"Specialisation","type":"text","placeholder":"Weddings, Corporates, Concerts"}]),
-    ("venue",            "Venue / Banquet Hall",        "🏛️", 1,
+    ("venue",             "Venue / Banquet Hall",        "🏛️", 1,
      [{"name":"capacity","label":"Hall Capacity","type":"number","placeholder":"500","unit":"people"},
       {"name":"hall_type","label":"Hall Type","type":"select","options":["Indoor","Outdoor","Rooftop","Marquee","Both"]}]),
-    ("catering",         "Catering",                   "🍽️", 2,
+    ("catering",          "Catering",                   "🍽️", 2,
      [{"name":"cuisine","label":"Cuisine Type","type":"text","placeholder":"Nigerian, Continental, Asian"},
-      {"name":"menu_items","label":"Signature Dishes","type":"text","placeholder":"Jollof, Fried Rice, Swallow, Pepper Soup"}]),
-    ("small_chops",      "Small Chops & Finger Foods",  "🍢", 3,
-     [{"name":"items","label":"Items Included","type":"text","placeholder":"Puff-puff, Samosa, Spring rolls, Asun, Nkwobi"}]),
-    ("cake_confectionery","Cake & Confectionery",       "🎂", 4,
+      {"name":"menu_items","label":"Signature Dishes","type":"text","placeholder":"Jollof, Fried Rice, Swallow"}]),
+    ("small_chops",       "Small Chops & Finger Foods",  "🍢", 3,
+     [{"name":"items","label":"Items Included","type":"text","placeholder":"Puff-puff, Samosa, Spring rolls"}]),
+    ("cake_confectionery","Cake & Confectionery",        "🎂", 4,
      [{"name":"cake_type","label":"Cake Style","type":"select","options":["Buttercream","Fondant","Drip","Floral","3D Custom"]},
       {"name":"max_tiers","label":"Max Tiers","type":"number","placeholder":"5"}]),
-    ("bar_mixology",     "Bar & Mixology",             "🍸", 5,
+    ("bar_mixology",      "Bar & Mixology",              "🍸", 5,
      [{"name":"bar_type","label":"Bar Style","type":"select","options":["Full Bar","Mocktails Only","Afro-tending","Dry Ice/Smoke Effects"]},
       {"name":"includes_alcohol","label":"Alcohol Included","type":"select","options":["Yes","No","Client Supplies"]}]),
-    ("decoration",       "Decoration & Styling",       "🌸", 6,
+    ("decoration",        "Decoration & Styling",        "🌸", 6,
      [{"name":"theme","label":"Speciality Theme","type":"text","placeholder":"Luxury, Rustic, Floral, Garden, Modern"},
       {"name":"includes_lights","label":"Lighting Included","type":"select","options":["Yes","No","Optional Add-on"]}]),
-    ("photography",      "Photography",                "📸", 7,
+    ("photography",       "Photography",                 "📸", 7,
      [{"name":"coverage_hours","label":"Coverage Hours","type":"number","placeholder":"8"},
       {"name":"crew_size","label":"Crew Size","type":"number","placeholder":"2"}]),
-    ("videography",      "Videography / Cinematography","🎬", 8,
+    ("videography",       "Videography / Cinematography","🎬", 8,
      [{"name":"format","label":"Output Format","type":"select","options":["4K","1080p HD","Drone + Ground","Same-Day Edit"]},
       {"name":"crew_size","label":"Crew Size","type":"number","placeholder":"2"}]),
-    ("dj_services",      "DJ Services",                "🎧", 9,
+    ("dj_services",       "DJ Services",                 "🎧", 9,
      [{"name":"includes_pa","label":"PA System Included","type":"select","options":["Yes","No"]},
       {"name":"genres","label":"Music Genres","type":"text","placeholder":"Afrobeats, Hip-hop, Highlife, R&B"}]),
-    ("live_band",        "Live Band",                  "🎺", 10,
+    ("live_band",         "Live Band",                   "🎺", 10,
      [{"name":"band_size","label":"Number of Performers","type":"number","placeholder":"8"},
       {"name":"genres","label":"Music Genres","type":"text","placeholder":"Highlife, Fuji, Afrobeats, Gospel"}]),
-    ("mc",               "Master of Ceremonies (MC)",  "🎤", 11,
+    ("mc",                "Master of Ceremonies (MC)",   "🎤", 11,
      [{"name":"mc_type","label":"MC Style","type":"select","options":["Corporate","Social/Wedding","Bilingual","Celebrity"]},
       {"name":"languages","label":"Languages","type":"text","placeholder":"English, Yoruba, Igbo, Hausa"}]),
-    ("cultural_emcee",   "Cultural Emcee (Alaga)",     "👘", 12,
+    ("cultural_emcee",    "Cultural Emcee (Alaga)",      "👘", 12,
      [{"name":"tribe","label":"Tribe/Culture","type":"select","options":["Yoruba","Igbo","Hausa","Other"]},
       {"name":"rites","label":"Rites Covered","type":"text","placeholder":"Eru Iyawo, Igba Nkwu, Kamu"}]),
-    ("security",         "Security",                   "🛡️", 13,
+    ("security",          "Security",                    "🛡️", 13,
      [{"name":"security_type","label":"Security Type","type":"select","options":["Bouncers","CPO","Armed Guard","K9 Unit","Full Package"]},
       {"name":"num_personnel","label":"Personnel Count","type":"number","placeholder":"4"}]),
-    ("makeup_beauty",    "Makeup & Beauty",            "💄", 14,
+    ("makeup_beauty",     "Makeup & Beauty",             "💄", 14,
      [{"name":"coverage","label":"Coverage","type":"select","options":["Bride Only","Bride + Bridesmaids","Full Bridal Train","Corporate Makeup"]},
       {"name":"cosmetic_brand","label":"Cosmetic Brand","type":"text","placeholder":"MAC, Fenty, Huda Beauty"}]),
-    ("transportation",   "Transportation & Logistics", "🚌", 15,
+    ("transportation",    "Transportation & Logistics",  "🚌", 15,
      [{"name":"vehicle_type","label":"Vehicle Type","type":"select","options":["AC Bus","Sprinter Van","Luxury Cars","Trucks","Mixed Fleet"]},
       {"name":"num_vehicles","label":"Number of Vehicles","type":"number","placeholder":"3"}]),
-    ("sound_engineering","Sound Engineering & AV",     "🔊", 16,
+    ("sound_engineering", "Sound Engineering & AV",      "🔊", 16,
      [{"name":"pa_size","label":"PA System Size","type":"select","options":["Small (≤100 pax)","Medium (100-300 pax)","Large (300-1000 pax)","Stadium"]},
       {"name":"includes_lights","label":"Lighting Rig Included","type":"select","options":["Yes","No","Optional"]}]),
-    ("other",            "Other",                      "🛎️", 17, None),
+    ("other",             "Other",                       "🛎️", 17, None),
 ]
 
 for key, label, icon, order, info_fields in cat_data:
@@ -93,7 +102,8 @@ def make_user(name, email, pw, role):
     if not u:
         u = User(name=name, email=email, password_hash=hash_password(pw),
                  user_type=role, phone_number="+2348012345678")
-        db.add(u); db.flush()
+        db.add(u)
+        db.flush()
     return u
 
 admin = make_user("System Admin",       "admin@ems.com",     "admin123",  UserType.admin)
@@ -168,32 +178,43 @@ vendor_seed = [
   ]),
 ]
 
-for (user,bname,avail,verified,rating,rcount,limit,lat,lng,addr,svcs) in vendor_seed:
+for (user, bname, avail, verified, rating, rcount, limit, lat, lng, addr, svcs) in vendor_seed:
     if not db.query(Vendor).filter_by(user_id=user.id).first():
-        v = Vendor(business_name=bname, availability_status=avail, is_verified=verified,
-                   rating=rating, rating_count=rcount, service_radius_km=60,
-                   service_limit=limit, user_id=user.id,
+        v = Vendor(business_name=bname, availability_status=avail,
+                   is_verified=verified, rating=rating, rating_count=rcount,
+                   service_radius_km=60, service_limit=limit, user_id=user.id,
                    description="Professional services for events of all sizes.")
-        db.add(v); db.flush()
+        db.add(v)
+        db.flush()
         db.add(Location(address=addr, latitude=lat, longitude=lng, vendor_id=v.id))
-        for (cat,sname,pm,fp,pph,mg,pr,hr,dep,extra) in svcs:
-            db.add(VendorService(vendor_id=v.id, service_name=sname, category_key=cat,
-                                  pricing_model_key=pm, fixed_price=fp, price_per_head=pph,
-                                  min_guests=mg, percentage_rate=pr, hourly_rate=hr,
-                                  deposit_percent=dep, vat_applicable=True, extra_info=extra))
+        for (cat, sname, pm, fp, pph, mg, pr, hr, dep, extra) in svcs:
+            db.add(VendorService(
+                vendor_id=v.id, service_name=sname, category_key=cat,
+                pricing_model_key=pm, fixed_price=fp, price_per_head=pph,
+                min_guests=mg, percentage_rate=pr, hourly_rate=hr,
+                deposit_percent=dep, vat_applicable=True, extra_info=extra,
+            ))
 db.commit()
 
-for (name,etype,uid,budget,att,addr,lat,lng,dt) in [
-    ("TechFest Lagos 2025","Conference",org.id,2000000,300,"Eko Hotel, VI, Lagos",6.4281,3.4219,"2025-09-15T09:00:00"),
-    ("Chukwuemeka & Ada Wedding","Wedding",org.id,5000000,200,"Civic Centre, Victoria Island",6.4339,3.4176,"2025-08-10T14:00:00"),
-    ("Lagos Fashion Week 2025","Exhibition",org2.id,3500000,500,"Federal Palace Hotel",6.4254,3.4166,"2025-10-05T10:00:00"),
+# ── Events ────────────────────────────────────────────────────────────────────
+for (name, etype, uid, budget, att, addr, lat, lng, dt) in [
+    ("TechFest Lagos 2025",       "Conference", org.id,  2000000, 300,
+     "Eko Hotel, VI, Lagos",         6.4281, 3.4219, "2025-09-15T09:00:00"),
+    ("Chukwuemeka & Ada Wedding", "Wedding",    org.id,  5000000, 200,
+     "Civic Centre, Victoria Island", 6.4339, 3.4176, "2025-08-10T14:00:00"),
+    ("Lagos Fashion Week 2025",   "Exhibition", org2.id, 3500000, 500,
+     "Federal Palace Hotel",          6.4254, 3.4166, "2025-10-05T10:00:00"),
 ]:
     if not db.query(Event).filter_by(name=name).first():
-        db.add(Event(name=name,event_type=etype,budget=budget,attendee_count=att,
-                     location_address=addr,location_lat=lat,location_lng=lng,
-                     event_date=datetime.fromisoformat(dt),user_id=uid,
-                     required_services="Catering, Decoration, Photography"))
+        db.add(Event(
+            name=name, event_type=etype, budget=budget, attendee_count=att,
+            location_address=addr, location_lat=lat, location_lng=lng,
+            event_date=datetime.fromisoformat(dt), user_id=uid,
+            required_services="Catering, Decoration, Photography",
+        ))
 db.commit()
 
 print("✅ Seed complete.")
-print("   admin@ems.com / admin123 | organizer@ems.com / org123 | vendor@ems.com / vendor123")
+print("   admin@ems.com / admin123")
+print("   organizer@ems.com / org123")
+print("   vendor@ems.com / vendor123")

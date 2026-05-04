@@ -11,11 +11,14 @@ import asyncio
 router = APIRouter(prefix="/api/bookings", tags=["bookings"])
 
 
-def _booking_out(b: models.Booking) -> dict:
+def _booking_out(b: models.Booking) -> BookingOut:
     return BookingOut(
         id=b.id, event_id=b.event_id, vendor_id=b.vendor_id,
+        vendor_service_id=b.vendor_service_id,
         booking_date=b.booking_date, status=b.status,
-        service_details=b.service_details, created_at=b.created_at,
+        service_details=b.service_details,
+        guest_count=b.guest_count, agreed_price=float(b.agreed_price) if b.agreed_price else None,
+        created_at=b.created_at,
     )
 
 
@@ -24,8 +27,10 @@ async def create_booking(data: BookingCreate, db: Session = Depends(get_db),
                          current_user: models.User = Depends(get_current_user)):
     if current_user.user_type != models.UserType.organizer:
         raise HTTPException(403, "Only organizers can create bookings")
-    event = db.query(models.Event).filter(models.Event.id == data.event_id,
-                                           models.Event.user_id == current_user.id).first()
+    event = db.query(models.Event).filter(
+        models.Event.id == data.event_id,
+        models.Event.user_id == current_user.id,
+    ).first()
     if not event:
         raise HTTPException(404, "Event not found")
     vendor = db.query(models.Vendor).filter(models.Vendor.id == data.vendor_id).first()
@@ -34,30 +39,37 @@ async def create_booking(data: BookingCreate, db: Session = Depends(get_db),
     if not vendor.is_verified:
         raise HTTPException(400, "Vendor not yet verified")
 
-    booking = models.Booking(event_id=data.event_id, vendor_id=data.vendor_id,
-                              service_details=data.service_details)
+    booking = models.Booking(
+        event_id=data.event_id, vendor_id=data.vendor_id,
+        vendor_service_id=data.vendor_service_id,
+        service_details=data.service_details,
+        guest_count=data.guest_count, agreed_price=data.agreed_price,
+    )
     db.add(booking)
     db.commit()
     db.refresh(booking)
 
-    # Notify vendor
     asyncio.create_task(push_notification(
         vendor.user_id,
         f"New booking request for '{event.name}' on {event.event_date.strftime('%Y-%m-%d')}.",
-        "booking_request"
+        "booking_request",
     ))
     return _booking_out(booking)
 
 
 @router.get("", response_model=List[BookingOut])
-def list_bookings(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def list_bookings(db: Session = Depends(get_db),
+                  current_user: models.User = Depends(get_current_user)):
     if current_user.user_type == models.UserType.organizer:
-        # All bookings for my events
         event_ids = [e.id for e in current_user.events]
-        bookings = db.query(models.Booking).filter(models.Booking.event_id.in_(event_ids)).all()
+        bookings = db.query(models.Booking).filter(
+            models.Booking.event_id.in_(event_ids)).all()
     elif current_user.user_type == models.UserType.vendor:
-        vendor = db.query(models.Vendor).filter(models.Vendor.user_id == current_user.id).first()
-        bookings = db.query(models.Booking).filter(models.Booking.vendor_id == vendor.id).all() if vendor else []
+        vendor = db.query(models.Vendor).filter(
+            models.Vendor.user_id == current_user.id).first()
+        bookings = (db.query(models.Booking)
+                      .filter(models.Booking.vendor_id == vendor.id).all()
+                    if vendor else [])
     else:
         bookings = db.query(models.Booking).all()
     return [_booking_out(b) for b in bookings]
@@ -80,9 +92,9 @@ async def update_booking_status(booking_id: int, data: BookingStatusUpdate,
     if not b:
         raise HTTPException(404, "Booking not found")
 
-    # Vendors can accept/decline; organizers can cancel
     if current_user.user_type == models.UserType.vendor:
-        vendor = db.query(models.Vendor).filter(models.Vendor.user_id == current_user.id).first()
+        vendor = db.query(models.Vendor).filter(
+            models.Vendor.user_id == current_user.id).first()
         if not vendor or b.vendor_id != vendor.id:
             raise HTTPException(403, "Not your booking")
         if data.status not in [models.BookingStatus.confirmed, models.BookingStatus.declined]:
@@ -92,28 +104,31 @@ async def update_booking_status(booking_id: int, data: BookingStatusUpdate,
             raise HTTPException(403, "Not your event")
         if data.status != models.BookingStatus.cancelled:
             raise HTTPException(400, "Organizers can only cancel bookings")
-    
-    old_status = b.status
+
     b.status = data.status
-    
-    # If confirmed, auto-decline other pending bookings for same vendor+date
+
+    # Auto-decline conflicting pending bookings when one is confirmed
     if data.status == models.BookingStatus.confirmed:
-        conflicts = db.query(models.Booking).join(models.Event).filter(
-            models.Booking.vendor_id == b.vendor_id,
-            models.Booking.id != b.id,
-            models.Booking.status == models.BookingStatus.pending,
-            models.Event.event_date == b.event.event_date,
-        ).all()
+        conflicts = (
+            db.query(models.Booking)
+            .join(models.Event)
+            .filter(
+                models.Booking.vendor_id == b.vendor_id,
+                models.Booking.id != b.id,
+                models.Booking.status == models.BookingStatus.pending,
+                models.Event.event_date == b.event.event_date,
+            ).all()
+        )
         for c in conflicts:
             c.status = models.BookingStatus.declined
 
     db.commit()
     db.refresh(b)
 
-    # Notify organizer
     organizer_id = b.event.organizer.id
-    vendor_name = b.vendor.business_name
-    event_name  = b.event.name
+    vendor_name  = b.vendor.business_name
+    event_name   = b.event.name
+
     notif_msg = {
         models.BookingStatus.confirmed: f"'{vendor_name}' confirmed your booking for '{event_name}'!",
         models.BookingStatus.declined:  f"'{vendor_name}' declined your booking request for '{event_name}'.",
@@ -121,18 +136,19 @@ async def update_booking_status(booking_id: int, data: BookingStatusUpdate,
     }.get(data.status)
 
     if notif_msg:
-        if data.status == models.BookingStatus.cancelled and current_user.user_type == models.UserType.organizer:
-            # Notify vendor of cancellation
+        if (data.status == models.BookingStatus.cancelled
+                and current_user.user_type == models.UserType.organizer):
             asyncio.create_task(push_notification(b.vendor.user_id, notif_msg, "warning"))
         else:
-            asyncio.create_task(push_notification(organizer_id, notif_msg,
-                                                   "success" if data.status == models.BookingStatus.confirmed else "warning"))
+            asyncio.create_task(push_notification(
+                organizer_id, notif_msg,
+                "success" if data.status == models.BookingStatus.confirmed else "warning",
+            ))
 
-    # Persist notification to DB
     notif = models.Notification(
         user_id=organizer_id,
         message=notif_msg or f"Booking status updated to {data.status}",
-        notification_type=data.status,
+        notification_type=str(data.status),
     )
     db.add(notif)
     db.commit()

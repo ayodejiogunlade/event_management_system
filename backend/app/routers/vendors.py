@@ -28,9 +28,11 @@ def _svc_out(s: models.VendorService) -> VendorServiceOut:
 def _to_vendor_out(v: models.Vendor) -> VendorOut:
     loc = None
     if v.location:
-        loc = LocationOut(id=v.location.id, address=v.location.address,
-                          latitude=float(v.location.latitude),
-                          longitude=float(v.location.longitude))
+        loc = LocationOut(
+            id=v.location.id, address=v.location.address,
+            latitude=float(v.location.latitude),
+            longitude=float(v.location.longitude),
+        )
     return VendorOut(
         id=v.id, business_name=v.business_name, description=v.description,
         availability_status=v.availability_status, rating=v.rating,
@@ -44,11 +46,13 @@ def _to_vendor_out(v: models.Vendor) -> VendorOut:
 
 
 def _get_default_limit(db: Session) -> int:
-    s = db.query(models.SystemSetting).filter(models.SystemSetting.key == "default_service_limit").first()
+    s = db.query(models.SystemSetting).filter(
+        models.SystemSetting.key == "default_service_limit").first()
     return int(s.value) if s else 1
 
 
 # ── Profile ────────────────────────────────────────────────────────────────────
+
 @router.post("", response_model=VendorOut, status_code=201)
 def create_vendor(data: VendorCreate, db: Session = Depends(get_db),
                   cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
@@ -57,12 +61,17 @@ def create_vendor(data: VendorCreate, db: Session = Depends(get_db),
     default_limit = _get_default_limit(db)
     payload = data.model_dump(exclude={"location"})
     v = models.Vendor(**payload, user_id=cu.id, service_limit=default_limit)
-    db.add(v); db.flush()
+    db.add(v)
+    db.flush()
     if data.location:
-        db.add(models.Location(address=data.location.address,
-                                latitude=data.location.latitude,
-                                longitude=data.location.longitude, vendor_id=v.id))
-    db.commit(); db.refresh(v)
+        db.add(models.Location(
+            address=data.location.address,
+            latitude=data.location.latitude,
+            longitude=data.location.longitude,
+            vendor_id=v.id,
+        ))
+    db.commit()
+    db.refresh(v)
     return _to_vendor_out(v)
 
 
@@ -74,7 +83,8 @@ def list_vendors(service_category: Optional[str] = None, verified_only: bool = F
         q = q.filter(models.Vendor.is_verified == True)
     vendors = q.all()
     if service_category:
-        vendors = [v for v in vendors if any(s.category_key == service_category for s in v.services)]
+        vendors = [v for v in vendors
+                   if any(s.category_key == service_category for s in v.services)]
     return [_to_vendor_out(v) for v in vendors]
 
 
@@ -82,14 +92,16 @@ def list_vendors(service_category: Optional[str] = None, verified_only: bool = F
 def my_vendor(db: Session = Depends(get_db),
               cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
-    if not v: raise HTTPException(404, "Vendor profile not found")
+    if not v:
+        raise HTTPException(404, "Vendor profile not found")
     return _to_vendor_out(v)
 
 
 @router.get("/{vid}", response_model=VendorOut)
 def get_vendor(vid: int, db: Session = Depends(get_db)):
     v = db.query(models.Vendor).filter(models.Vendor.id == vid).first()
-    if not v: raise HTTPException(404)
+    if not v:
+        raise HTTPException(404)
     return _to_vendor_out(v)
 
 
@@ -97,36 +109,45 @@ def get_vendor(vid: int, db: Session = Depends(get_db)):
 def update_vendor(data: VendorUpdate, db: Session = Depends(get_db),
                   cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
-    if not v: raise HTTPException(404)
+    if not v:
+        raise HTTPException(404)
     for k, val in data.model_dump(exclude_none=True, exclude={"location"}).items():
         setattr(v, k, val)
     if data.location:
         if v.location:
-            v.location.address = data.location.address
-            v.location.latitude = data.location.latitude
+            v.location.address   = data.location.address
+            v.location.latitude  = data.location.latitude
             v.location.longitude = data.location.longitude
         else:
-            db.add(models.Location(address=data.location.address,
-                                    latitude=data.location.latitude,
-                                    longitude=data.location.longitude, vendor_id=v.id))
-    db.commit(); db.refresh(v)
+            db.add(models.Location(
+                address=data.location.address,
+                latitude=data.location.latitude,
+                longitude=data.location.longitude,
+                vendor_id=v.id,
+            ))
+    db.commit()
+    db.refresh(v)
     return _to_vendor_out(v)
 
 
 # ── Services ───────────────────────────────────────────────────────────────────
+
 @router.post("/me/services", response_model=VendorServiceOut, status_code=201)
 def add_service(data: VendorServiceCreate, db: Session = Depends(get_db),
                 cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
-    if not v: raise HTTPException(404, "Create your vendor profile first")
-    active = db.query(models.VendorService).filter(
+    if not v:
+        raise HTTPException(404, "Create your vendor profile first")
+    active_count = db.query(models.VendorService).filter(
         models.VendorService.vendor_id == v.id,
-        models.VendorService.is_active == True
+        models.VendorService.is_active == True,
     ).count()
-    if v.service_limit != -1 and active >= v.service_limit:
+    if v.service_limit != -1 and active_count >= v.service_limit:
         raise HTTPException(400, f"Service limit ({v.service_limit}) reached. Contact admin to upgrade.")
     svc = models.VendorService(**data.model_dump(), vendor_id=v.id)
-    db.add(svc); db.commit(); db.refresh(svc)
+    db.add(svc)
+    db.commit()
+    db.refresh(svc)
     return _svc_out(svc)
 
 
@@ -142,12 +163,15 @@ def update_service(sid: int, data: VendorServiceUpdate, db: Session = Depends(ge
                    cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
     svc = db.query(models.VendorService).filter(
-        models.VendorService.id == sid, models.VendorService.vendor_id == v.id
+        models.VendorService.id == sid,
+        models.VendorService.vendor_id == v.id,
     ).first() if v else None
-    if not svc: raise HTTPException(404)
+    if not svc:
+        raise HTTPException(404)
     for k, val in data.model_dump(exclude_none=True).items():
         setattr(svc, k, val)
-    db.commit(); db.refresh(svc)
+    db.commit()
+    db.refresh(svc)
     return _svc_out(svc)
 
 
@@ -156,7 +180,10 @@ def delete_service(sid: int, db: Session = Depends(get_db),
                    cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
     svc = db.query(models.VendorService).filter(
-        models.VendorService.id == sid, models.VendorService.vendor_id == v.id
+        models.VendorService.id == sid,
+        models.VendorService.vendor_id == v.id,
     ).first() if v else None
-    if not svc: raise HTTPException(404)
-    svc.is_active = False; db.commit()
+    if not svc:
+        raise HTTPException(404)
+    svc.is_active = False
+    db.commit()

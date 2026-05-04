@@ -42,7 +42,7 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
             "email": user.email,
             "user_type": user.user_type,
             "phone_number": user.phone_number,
-        }
+        },
     }
 
 
@@ -52,7 +52,8 @@ def me(current_user: models.User = Depends(get_current_user)):
 
 
 @router.put("/me", response_model=UserOut)
-def update_me(data: UserUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def update_me(data: UserUpdate, db: Session = Depends(get_db),
+              current_user: models.User = Depends(get_current_user)):
     if data.name:
         current_user.name = data.name
     if data.phone_number:

@@ -1,3 +1,14 @@
+"""
+matching.py — MCDM Vendor Matching Engine
+
+Implements a two-stage vendor matching process:
+  Stage 1: Hard constraint filtering (category, availability, verification, radius, date)
+  Stage 2: Composite MCDM scoring:
+           S = 0.4 × S_distance + 0.3 × S_price + 0.3 × S_rating
+
+Distance is computed using the Haversine formula (great-circle distance in km).
+"""
+
 import math
 from typing import List, Dict, Optional
 from itertools import product as iterproduct
@@ -10,35 +21,40 @@ from app.schemas import (PlannerQuery, BudgetPackage, MatchedVendor,
 
 
 def haversine_km(lat1, lon1, lat2, lon2) -> float:
+    """
+    Compute great-circle distance in kilometres between two points
+    on the Earth's surface using the Haversine formula.
+    """
     R = 6371.0
-    p1, p2 = math.radians(float(lat1)), math.radians(float(lat2))
+    p1 = math.radians(float(lat1))
+    p2 = math.radians(float(lat2))
     dp = math.radians(float(lat2) - float(lat1))
     dl = math.radians(float(lon2) - float(lon1))
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    a  = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def _effective_price(svc: models.VendorService, budget: float, guests: int) -> Optional[float]:
-    """Return effective price of a service or None if it exceeds budget."""
+    """
+    Return the effective price of a service given a budget and guest count.
+    Returns None if the service has no valid price configured.
+    """
     pm = svc.pricing_model_key
     if pm == "fixed_fee":
         return float(svc.fixed_price) if svc.fixed_price else None
     if pm == "per_head":
-        if not svc.price_per_head:
-            return None
-        return float(svc.price_per_head) * guests
+        return float(svc.price_per_head) * guests if svc.price_per_head else None
     if pm == "percentage":
-        if not svc.percentage_rate:
-            return None
-        return (svc.percentage_rate / 100.0) * budget
+        return (svc.percentage_rate / 100.0) * budget if svc.percentage_rate else None
     if pm == "hourly":
-        if not svc.hourly_rate:
-            return None
-        return float(svc.hourly_rate) * (svc.min_hours or 1)
+        return float(svc.hourly_rate) * (svc.min_hours or 1) if svc.hourly_rate else None
     return None
 
 
 def _is_available(db: Session, vendor_id: int, event_date: datetime) -> bool:
+    """
+    Return True if the vendor has no confirmed booking on the same calendar date.
+    """
     date = event_date.date()
     conflict = (
         db.query(models.Booking)
@@ -58,7 +74,6 @@ def _check_extra_info(svc: models.VendorService, req_extra: Optional[dict]) -> b
     """Check service-specific constraints (e.g. venue capacity >= attendees)."""
     if not req_extra or not svc.extra_info:
         return True
-    # Venue capacity check
     if "min_capacity" in req_extra:
         cap = svc.extra_info.get("capacity")
         if cap is not None and int(cap) < int(req_extra["min_capacity"]):
@@ -66,23 +81,44 @@ def _check_extra_info(svc: models.VendorService, req_extra: Optional[dict]) -> b
     return True
 
 
+def _svc_out(s: models.VendorService) -> VendorServiceOut:
+    return VendorServiceOut(
+        id=s.id, vendor_id=s.vendor_id, service_name=s.service_name,
+        category_key=s.category_key, description=s.description,
+        pricing_model_key=s.pricing_model_key,
+        fixed_price=float(s.fixed_price) if s.fixed_price else None,
+        price_per_head=float(s.price_per_head) if s.price_per_head else None,
+        min_guests=s.min_guests, percentage_rate=s.percentage_rate,
+        hourly_rate=float(s.hourly_rate) if s.hourly_rate else None,
+        min_hours=s.min_hours, deposit_percent=s.deposit_percent,
+        vat_applicable=s.vat_applicable, is_active=s.is_active,
+        extra_info=s.extra_info, created_at=s.created_at,
+    )
+
+
+# ── Multi-service Budget Planner ──────────────────────────────────────────────
+
 def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
     """
     Multi-service budget planner.
-    For each requested service, finds all vendors whose price fits the allocated budget,
-    are available on the event date, are within range, and match extra constraints.
-    Then builds all valid vendor combinations and returns up to 5 packages sorted by total cost.
+
+    For each requested service category, finds all vendors whose price fits
+    the allocated budget slice, are available on the event date, are within
+    the search radius, and pass any extra constraints.
+
+    Builds all valid vendor combinations (one vendor per category) and returns
+    up to 8 packages sorted by total cost ascending.
     """
-    # Fetch active category labels
     cat_map: Dict[str, str] = {
         c.key: c.label
-        for c in db.query(models.ServiceCategoryDef).filter(models.ServiceCategoryDef.is_active == True).all()
+        for c in db.query(models.ServiceCategoryDef)
+                   .filter(models.ServiceCategoryDef.is_active == True).all()
     }
 
     per_service_candidates: List[List[MatchedVendor]] = []
 
     for req in query.services:
-        allocated = query.total_budget * (req.budget_percent / 100.0)
+        allocated  = query.total_budget * (req.budget_percent / 100.0)
         candidates: List[MatchedVendor] = []
 
         vendors = db.query(models.Vendor).filter(
@@ -95,7 +131,7 @@ def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
                 continue
             dist = haversine_km(
                 query.event_lat, query.event_lng,
-                float(v.location.latitude), float(v.location.longitude)
+                float(v.location.latitude), float(v.location.longitude),
             )
             if dist > query.search_radius_km or dist > v.service_radius_km:
                 continue
@@ -130,20 +166,16 @@ def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
                     extra_info=svc.extra_info,
                 ))
 
-        # Sort candidates by price asc (cheapest first), keep top 5 per service
         candidates.sort(key=lambda x: x.price)
         per_service_candidates.append(candidates[:5] if candidates else [])
 
-    # If any service has zero candidates, no packages can be formed
     if any(len(c) == 0 for c in per_service_candidates):
         return []
 
-    # Build all combinations of one vendor per service
     packages: List[BudgetPackage] = []
     seen_combos = set()
 
     for combo in iterproduct(*per_service_candidates):
-        # Deduplicate: same vendor can't appear twice in one package
         vendor_ids = [m.vendor_id for m in combo]
         if len(vendor_ids) != len(set(vendor_ids)):
             continue
@@ -165,7 +197,6 @@ def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
             savings=round(query.total_budget - total, 2),
         ))
 
-    # Sort by total cost ascending, return best 8
     packages.sort(key=lambda p: p.total_cost)
     for i, p in enumerate(packages[:8], 1):
         p.package_number = i
@@ -173,22 +204,13 @@ def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
 
 
 # ── Legacy single-service match ───────────────────────────────────────────────
-def _svc_out(s: models.VendorService) -> VendorServiceOut:
-    return VendorServiceOut(
-        id=s.id, vendor_id=s.vendor_id, service_name=s.service_name,
-        category_key=s.category_key, description=s.description,
-        pricing_model_key=s.pricing_model_key,
-        fixed_price=float(s.fixed_price) if s.fixed_price else None,
-        price_per_head=float(s.price_per_head) if s.price_per_head else None,
-        min_guests=s.min_guests, percentage_rate=s.percentage_rate,
-        hourly_rate=float(s.hourly_rate) if s.hourly_rate else None,
-        min_hours=s.min_hours, deposit_percent=s.deposit_percent,
-        vat_applicable=s.vat_applicable, is_active=s.is_active,
-        extra_info=s.extra_info, created_at=s.created_at,
-    )
-
 
 def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
+    """
+    Single-category MCDM vendor matching.
+    Applies hard constraints then scores with:
+      S = 0.4 × S_distance + 0.3 × S_price + 0.3 × S_rating
+    """
     vendors = db.query(models.Vendor).filter(
         models.Vendor.availability_status == True,
         models.Vendor.is_verified == True,
@@ -196,18 +218,23 @@ def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
 
     results = []
     for v in vendors:
-        svc = next((s for s in v.services if s.is_active and s.category_key == query.service_category), None)
+        svc = next(
+            (s for s in v.services if s.is_active and s.category_key == query.service_category),
+            None,
+        )
         if not svc or not v.location:
             continue
         if not _is_available(db, v.id, query.event_date):
             continue
 
-        dist = haversine_km(query.event_lat, query.event_lng,
-                             float(v.location.latitude), float(v.location.longitude))
+        dist = haversine_km(
+            query.event_lat, query.event_lng,
+            float(v.location.latitude), float(v.location.longitude),
+        )
         if dist > query.search_radius_km or dist > v.service_radius_km:
             continue
 
-        price = _effective_price(svc, query.budget or 999999999, 100)
+        price = _effective_price(svc, query.budget or 999_999_999, 100)
         if query.budget and price and price > query.budget:
             continue
 
@@ -221,13 +248,16 @@ def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
 
     scored = []
     for v, dist, svc, price in results:
-        s_dist  = 1 - (dist / max_dist)
+        s_dist  = 1 - (dist  / max_dist)
         s_price = 1 - (price / max_price)
         s_rate  = v.rating / 5.0
-        score   = 0.4*s_dist + 0.3*s_price + 0.3*s_rate
+        score   = 0.4 * s_dist + 0.3 * s_price + 0.3 * s_rate
 
-        loc = LocationOut(id=v.location.id, address=v.location.address,
-                          latitude=float(v.location.latitude), longitude=float(v.location.longitude))
+        loc = LocationOut(
+            id=v.location.id, address=v.location.address,
+            latitude=float(v.location.latitude),
+            longitude=float(v.location.longitude),
+        )
         vo = VendorOut(
             id=v.id, business_name=v.business_name, description=v.description,
             availability_status=v.availability_status, rating=v.rating,
@@ -239,8 +269,10 @@ def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
             owner_email=v.user.email if v.user else None,
         )
         scored.append(VendorMatchResult(
-            vendor=vo, distance_km=round(dist, 2),
-            composite_score=round(score, 4), matched_service=_svc_out(svc)
+            vendor=vo,
+            distance_km=round(dist, 2),
+            composite_score=round(score, 4),
+            matched_service=_svc_out(svc),
         ))
 
     scored.sort(key=lambda x: x.composite_score, reverse=True)

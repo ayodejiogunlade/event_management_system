@@ -1,9 +1,12 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, Enum, ForeignKey, DECIMAL, JSON
+from sqlalchemy import (Column, Integer, String, Float, Boolean, DateTime,
+                        Text, Enum, ForeignKey, DECIMAL, JSON)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
 from app.database import Base
 
+
+# ── Enumerations ──────────────────────────────────────────────────────────────
 
 class UserType(str, enum.Enum):
     organizer = "organizer"
@@ -26,7 +29,8 @@ class EventStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
-# ── Configurable lookup tables (admin-managed) ────────────────────────────────
+# ── Admin-managed lookup tables ───────────────────────────────────────────────
+
 class ServiceCategoryDef(Base):
     """Admin-managed service categories (replaces hard-coded enum)."""
     __tablename__ = "service_category_defs"
@@ -37,7 +41,6 @@ class ServiceCategoryDef(Base):
     icon        = Column(String(10), default="🛎️")
     is_active   = Column(Boolean, default=True)
     sort_order  = Column(Integer, default=0)
-    # Service-specific fields schema stored as JSON
     info_fields = Column(JSON, nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -63,6 +66,7 @@ class SystemSetting(Base):
 
 
 # ── Core tables ───────────────────────────────────────────────────────────────
+
 class User(Base):
     __tablename__ = "users"
     id            = Column(Integer, primary_key=True, index=True)
@@ -74,9 +78,9 @@ class User(Base):
     is_active     = Column(Boolean, default=True)
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
-    events         = relationship("Event",        back_populates="organizer",     cascade="all, delete-orphan")
-    vendor_profile = relationship("Vendor",       back_populates="user",          uselist=False, cascade="all, delete-orphan")
-    notifications  = relationship("Notification", back_populates="user",          cascade="all, delete-orphan")
+    events         = relationship("Event",        back_populates="organizer",    cascade="all, delete-orphan")
+    vendor_profile = relationship("Vendor",       back_populates="user",         uselist=False, cascade="all, delete-orphan")
+    notifications  = relationship("Notification", back_populates="user",         cascade="all, delete-orphan")
 
 
 class Location(Base):
@@ -113,17 +117,17 @@ class Event(Base):
 
 class Vendor(Base):
     __tablename__ = "vendors"
-    id                = Column(Integer, primary_key=True, index=True)
-    business_name     = Column(String(255), nullable=False)
-    description       = Column(Text)
+    id                  = Column(Integer, primary_key=True, index=True)
+    business_name       = Column(String(255), nullable=False)
+    description         = Column(Text)
     availability_status = Column(Boolean, default=True)
-    rating            = Column(Float, default=0.0)
-    rating_count      = Column(Integer, default=0)
-    service_radius_km = Column(Float, default=50.0)
-    is_verified       = Column(Boolean, default=False)
-    service_limit     = Column(Integer, default=1)   # -1 = unlimited
-    user_id           = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
-    created_at        = Column(DateTime(timezone=True), server_default=func.now())
+    rating              = Column(Float, default=0.0)
+    rating_count        = Column(Integer, default=0)
+    service_radius_km   = Column(Float, default=50.0)
+    is_verified         = Column(Boolean, default=False)
+    service_limit       = Column(Integer, default=1)   # -1 = unlimited
+    user_id             = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    created_at          = Column(DateTime(timezone=True), server_default=func.now())
 
     user      = relationship("User",          back_populates="vendor_profile")
     bookings  = relationship("Booking",       back_populates="vendor")
@@ -134,26 +138,23 @@ class Vendor(Base):
 
 class VendorService(Base):
     __tablename__ = "vendor_services"
-    id             = Column(Integer, primary_key=True, index=True)
-    vendor_id      = Column(Integer, ForeignKey("vendors.id"), nullable=False)
-    service_name   = Column(String(255), nullable=False)
-    category_key   = Column(String(80),  nullable=False)   # FK-like to ServiceCategoryDef.key
-    description    = Column(Text)
-    pricing_model_key = Column(String(80), nullable=False, default="fixed_fee")
-
-    fixed_price     = Column(DECIMAL(12, 2), nullable=True)
-    price_per_head  = Column(DECIMAL(12, 2), nullable=True)
-    min_guests      = Column(Integer, nullable=True)
-    percentage_rate = Column(Float,  nullable=True)
-    hourly_rate     = Column(DECIMAL(12, 2), nullable=True)
-    min_hours       = Column(Float,  nullable=True)
-    deposit_percent = Column(Float,  default=50.0)
-    vat_applicable  = Column(Boolean, default=True)
-    is_active       = Column(Boolean, default=True)
-
-    # service-specific extra info (capacity for venues, cuisine for caterers, etc.)
-    extra_info      = Column(JSON, nullable=True)
-    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+    id                = Column(Integer, primary_key=True, index=True)
+    vendor_id         = Column(Integer, ForeignKey("vendors.id"), nullable=False)
+    service_name      = Column(String(255), nullable=False)
+    category_key      = Column(String(80),  nullable=False)
+    description       = Column(Text)
+    pricing_model_key = Column(String(80),  nullable=False, default="fixed_fee")
+    fixed_price       = Column(DECIMAL(12, 2), nullable=True)
+    price_per_head    = Column(DECIMAL(12, 2), nullable=True)
+    min_guests        = Column(Integer,  nullable=True)
+    percentage_rate   = Column(Float,    nullable=True)
+    hourly_rate       = Column(DECIMAL(12, 2), nullable=True)
+    min_hours         = Column(Float,    nullable=True)
+    deposit_percent   = Column(Float,    default=50.0)
+    vat_applicable    = Column(Boolean,  default=True)
+    is_active         = Column(Boolean,  default=True)
+    extra_info        = Column(JSON,     nullable=True)
+    created_at        = Column(DateTime(timezone=True), server_default=func.now())
 
     vendor = relationship("Vendor", back_populates="services")
 
@@ -161,8 +162,8 @@ class VendorService(Base):
 class Booking(Base):
     __tablename__ = "bookings"
     id                = Column(Integer, primary_key=True, index=True)
-    event_id          = Column(Integer, ForeignKey("events.id"), nullable=False)
-    vendor_id         = Column(Integer, ForeignKey("vendors.id"), nullable=False)
+    event_id          = Column(Integer, ForeignKey("events.id"),          nullable=False)
+    vendor_id         = Column(Integer, ForeignKey("vendors.id"),         nullable=False)
     vendor_service_id = Column(Integer, ForeignKey("vendor_services.id"), nullable=True)
     booking_date      = Column(DateTime(timezone=True), server_default=func.now())
     status            = Column(Enum(BookingStatus), default=BookingStatus.pending)
