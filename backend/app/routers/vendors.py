@@ -15,10 +15,10 @@ def _svc_out(s: models.VendorService) -> VendorServiceOut:
         id=s.id, vendor_id=s.vendor_id, service_name=s.service_name,
         category_key=s.category_key, description=s.description,
         pricing_model_key=s.pricing_model_key,
-        fixed_price=float(s.fixed_price) if s.fixed_price else None,
-        price_per_head=float(s.price_per_head) if s.price_per_head else None,
+        fixed_price=float(s.fixed_price)      if s.fixed_price      else None,
+        price_per_head=float(s.price_per_head) if s.price_per_head   else None,
         min_guests=s.min_guests, percentage_rate=s.percentage_rate,
-        hourly_rate=float(s.hourly_rate) if s.hourly_rate else None,
+        hourly_rate=float(s.hourly_rate)      if s.hourly_rate       else None,
         min_hours=s.min_hours, deposit_percent=s.deposit_percent,
         vat_applicable=s.vat_applicable, is_active=s.is_active,
         extra_info=s.extra_info, created_at=s.created_at,
@@ -26,22 +26,35 @@ def _svc_out(s: models.VendorService) -> VendorServiceOut:
 
 
 def _to_vendor_out(v: models.Vendor) -> VendorOut:
+    """
+    Convert a Vendor ORM object to a VendorOut Pydantic schema.
+    Includes owner_name, owner_email, and owner_phone for contact details.
+    """
     loc = None
     if v.location:
         loc = LocationOut(
-            id=v.location.id, address=v.location.address,
+            id=v.location.id,
+            address=v.location.address,
             latitude=float(v.location.latitude),
             longitude=float(v.location.longitude),
         )
     return VendorOut(
-        id=v.id, business_name=v.business_name, description=v.description,
-        availability_status=v.availability_status, rating=v.rating,
-        rating_count=v.rating_count, service_radius_km=v.service_radius_km,
-        is_verified=v.is_verified, service_limit=v.service_limit,
-        user_id=v.user_id, created_at=v.created_at, location=loc,
+        id=v.id,
+        business_name=v.business_name,
+        description=v.description,
+        availability_status=v.availability_status,
+        rating=v.rating,
+        rating_count=v.rating_count,
+        service_radius_km=v.service_radius_km,
+        is_verified=v.is_verified,
+        service_limit=v.service_limit,
+        user_id=v.user_id,
+        created_at=v.created_at,
+        location=loc,
         services=[_svc_out(s) for s in v.services if s.is_active],
-        owner_name=v.user.name if v.user else None,
-        owner_email=v.user.email if v.user else None,
+        owner_name=v.user.name         if v.user else None,
+        owner_email=v.user.email       if v.user else None,
+        owner_phone=v.user.phone_number if v.user else None,  # ← contact phone
     )
 
 
@@ -51,7 +64,7 @@ def _get_default_limit(db: Session) -> int:
     return int(s.value) if s else 1
 
 
-# ── Profile ────────────────────────────────────────────────────────────────────
+# ── Profile endpoints ─────────────────────────────────────────────────────────
 
 @router.post("", response_model=VendorOut, status_code=201)
 def create_vendor(data: VendorCreate, db: Session = Depends(get_db),
@@ -76,7 +89,8 @@ def create_vendor(data: VendorCreate, db: Session = Depends(get_db),
 
 
 @router.get("", response_model=List[VendorOut])
-def list_vendors(service_category: Optional[str] = None, verified_only: bool = False,
+def list_vendors(service_category: Optional[str] = None,
+                 verified_only: bool = False,
                  db: Session = Depends(get_db)):
     q = db.query(models.Vendor)
     if verified_only:
@@ -98,10 +112,15 @@ def my_vendor(db: Session = Depends(get_db),
 
 
 @router.get("/{vid}", response_model=VendorOut)
-def get_vendor(vid: int, db: Session = Depends(get_db)):
+def get_vendor(vid: int, db: Session = Depends(get_db),
+               _=Depends(get_current_user)):
+    """
+    Fetch full vendor details including all services and contact information.
+    Used by the vendor detail modal on the Find Vendors page.
+    """
     v = db.query(models.Vendor).filter(models.Vendor.id == vid).first()
     if not v:
-        raise HTTPException(404)
+        raise HTTPException(404, "Vendor not found")
     return _to_vendor_out(v)
 
 
@@ -130,7 +149,7 @@ def update_vendor(data: VendorUpdate, db: Session = Depends(get_db),
     return _to_vendor_out(v)
 
 
-# ── Services ───────────────────────────────────────────────────────────────────
+# ── Service endpoints ─────────────────────────────────────────────────────────
 
 @router.post("/me/services", response_model=VendorServiceOut, status_code=201)
 def add_service(data: VendorServiceCreate, db: Session = Depends(get_db),
@@ -140,10 +159,10 @@ def add_service(data: VendorServiceCreate, db: Session = Depends(get_db),
         raise HTTPException(404, "Create your vendor profile first")
     active_count = db.query(models.VendorService).filter(
         models.VendorService.vendor_id == v.id,
-        models.VendorService.is_active == True,
+        models.VendorService.is_active  == True,
     ).count()
     if v.service_limit != -1 and active_count >= v.service_limit:
-        raise HTTPException(400, f"Service limit ({v.service_limit}) reached. Contact admin to upgrade.")
+        raise HTTPException(400, f"Service limit ({v.service_limit}) reached.")
     svc = models.VendorService(**data.model_dump(), vendor_id=v.id)
     db.add(svc)
     db.commit()
@@ -163,7 +182,7 @@ def update_service(sid: int, data: VendorServiceUpdate, db: Session = Depends(ge
                    cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
     svc = db.query(models.VendorService).filter(
-        models.VendorService.id == sid,
+        models.VendorService.id        == sid,
         models.VendorService.vendor_id == v.id,
     ).first() if v else None
     if not svc:
@@ -180,7 +199,7 @@ def delete_service(sid: int, db: Session = Depends(get_db),
                    cu=Depends(require_role(models.UserType.vendor, models.UserType.admin))):
     v = db.query(models.Vendor).filter(models.Vendor.user_id == cu.id).first()
     svc = db.query(models.VendorService).filter(
-        models.VendorService.id == sid,
+        models.VendorService.id        == sid,
         models.VendorService.vendor_id == v.id,
     ).first() if v else None
     if not svc:
