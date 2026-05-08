@@ -3,34 +3,52 @@ from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
 from app.schemas import (
-    MatchQuery, VendorMatchResult, PlannerQuery, BudgetPackage,
+    MatchQuery, VendorMatchResult, PlannerQuery, PlannerResponse,
     NotificationOut, VendorVerify, AdminUserUpdate, UserOut,
     VendorServiceLimitUpdate, DefaultServiceLimitUpdate,
     CategoryDefOut, CategoryDefCreate, CategoryDefUpdate,
     PricingModelDefOut, PricingModelDefCreate, PricingModelDefUpdate,
 )
 from app.auth import get_current_user
-from app.matching import match_vendors, plan_event
+from app.matching import match_vendors, plan_event_with_fallback
 import app.models as models
 
 # ── Planner ───────────────────────────────────────────────────────────────────
 planner_router = APIRouter(prefix="/api/planner", tags=["planner"])
 
-@planner_router.post("", response_model=List[BudgetPackage])
-def run_planner(query: PlannerQuery, db: Session = Depends(get_db),
-                _=Depends(get_current_user)):
+@planner_router.post("", response_model=PlannerResponse)
+def run_planner(
+    query: PlannerQuery,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """
+    Multi-service vendor discovery with automatic fallback.
+
+    Returns a PlannerResponse containing:
+      - packages:          exact or best-available vendor packages
+      - is_recommendation: True if constraints were relaxed to find results
+      - recommendation_reason / recommendation_labels: explains what changed
+      - per_category:      best vendors per requested category (always present)
+    """
     total_pct = sum(s.budget_percent for s in query.services)
     if abs(total_pct - 100.0) > 0.5:
-        raise HTTPException(400, f"Budget percentages must sum to 100% (got {total_pct:.1f}%)")
-    return plan_event(db, query)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Budget percentages must sum to 100% (got {total_pct:.1f}%)",
+        )
+    return plan_event_with_fallback(db, query)
 
 
 # ── Legacy single-service match ───────────────────────────────────────────────
 matching_router = APIRouter(prefix="/api/match", tags=["matching"])
 
 @matching_router.post("", response_model=List[VendorMatchResult])
-def run_matching(query: MatchQuery, db: Session = Depends(get_db),
-                 _=Depends(get_current_user)):
+def run_matching(
+    query: MatchQuery,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
     return match_vendors(db, query)
 
 
@@ -39,21 +57,26 @@ meta_router = APIRouter(prefix="/api/meta", tags=["meta"])
 
 @meta_router.get("/service-categories", response_model=List[CategoryDefOut])
 def service_categories(db: Session = Depends(get_db)):
-    return (db.query(models.ServiceCategoryDef)
-              .filter(models.ServiceCategoryDef.is_active == True)
-              .order_by(models.ServiceCategoryDef.sort_order, models.ServiceCategoryDef.label)
-              .all())
+    return (
+        db.query(models.ServiceCategoryDef)
+        .filter(models.ServiceCategoryDef.is_active == True)
+        .order_by(models.ServiceCategoryDef.sort_order, models.ServiceCategoryDef.label)
+        .all()
+    )
 
 @meta_router.get("/pricing-models", response_model=List[PricingModelDefOut])
 def pricing_models(db: Session = Depends(get_db)):
-    return (db.query(models.PricingModelDef)
-              .filter(models.PricingModelDef.is_active == True)
-              .all())
+    return (
+        db.query(models.PricingModelDef)
+        .filter(models.PricingModelDef.is_active == True)
+        .all()
+    )
 
 @meta_router.get("/default-service-limit")
 def get_default_limit(db: Session = Depends(get_db)):
     s = db.query(models.SystemSetting).filter(
-        models.SystemSetting.key == "default_service_limit").first()
+        models.SystemSetting.key == "default_service_limit"
+    ).first()
     return {"default_service_limit": int(s.value) if s else 1}
 
 
@@ -62,17 +85,24 @@ notif_router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
 @notif_router.get("", response_model=List[NotificationOut])
 def get_notifications(db: Session = Depends(get_db), cu=Depends(get_current_user)):
-    return (db.query(models.Notification)
-              .filter(models.Notification.user_id == cu.id)
-              .order_by(models.Notification.created_at.desc())
-              .limit(50).all())
+    return (
+        db.query(models.Notification)
+        .filter(models.Notification.user_id == cu.id)
+        .order_by(models.Notification.created_at.desc())
+        .limit(50)
+        .all()
+    )
 
 @notif_router.put("/read-all", status_code=204)
 def mark_all_read(db: Session = Depends(get_db), cu=Depends(get_current_user)):
-    (db.query(models.Notification)
-       .filter(models.Notification.user_id == cu.id,
-               models.Notification.is_read == False)
-       .update({"is_read": True}))
+    (
+        db.query(models.Notification)
+        .filter(
+            models.Notification.user_id == cu.id,
+            models.Notification.is_read == False,
+        )
+        .update({"is_read": True})
+    )
     db.commit()
 
 @notif_router.put("/{notif_id}/read", status_code=204)
@@ -175,7 +205,8 @@ def admin_list_events(db: Session = Depends(get_db), _=Depends(admin_only)):
             "location_address": e.location_address,
             "location_lat": float(e.location_lat) if e.location_lat else None,
             "location_lng": float(e.location_lng) if e.location_lng else None,
-            "description": e.description, "required_services": e.required_services,
+            "description": e.description,
+            "required_services": e.required_services,
             "user_id": e.user_id,
             "organizer_name":  e.organizer.name  if e.organizer else None,
             "organizer_email": e.organizer.email if e.organizer else None,
@@ -218,8 +249,7 @@ def list_categories(db: Session = Depends(get_db), _=Depends(admin_only)):
 @admin_router.post("/categories", response_model=CategoryDefOut, status_code=201)
 def create_category(data: CategoryDefCreate, db: Session = Depends(get_db),
                     _=Depends(admin_only)):
-    if db.query(models.ServiceCategoryDef).filter(
-            models.ServiceCategoryDef.key == data.key).first():
+    if db.query(models.ServiceCategoryDef).filter_by(key=data.key).first():
         raise HTTPException(400, "Category key already exists")
     c = models.ServiceCategoryDef(**data.model_dump())
     db.add(c)
@@ -230,8 +260,7 @@ def create_category(data: CategoryDefCreate, db: Session = Depends(get_db),
 @admin_router.put("/categories/{cid}", response_model=CategoryDefOut)
 def update_category(cid: int, data: CategoryDefUpdate, db: Session = Depends(get_db),
                     _=Depends(admin_only)):
-    c = db.query(models.ServiceCategoryDef).filter(
-        models.ServiceCategoryDef.id == cid).first()
+    c = db.query(models.ServiceCategoryDef).filter_by(id=cid).first()
     if not c:
         raise HTTPException(404)
     for k, v in data.model_dump(exclude_none=True).items():
@@ -248,8 +277,7 @@ def list_pricing_models(db: Session = Depends(get_db), _=Depends(admin_only)):
 @admin_router.post("/pricing-models", response_model=PricingModelDefOut, status_code=201)
 def create_pricing_model(data: PricingModelDefCreate, db: Session = Depends(get_db),
                          _=Depends(admin_only)):
-    if db.query(models.PricingModelDef).filter(
-            models.PricingModelDef.key == data.key).first():
+    if db.query(models.PricingModelDef).filter_by(key=data.key).first():
         raise HTTPException(400, "Pricing model key already exists")
     p = models.PricingModelDef(**data.model_dump())
     db.add(p)
@@ -260,7 +288,7 @@ def create_pricing_model(data: PricingModelDefCreate, db: Session = Depends(get_
 @admin_router.put("/pricing-models/{pid}", response_model=PricingModelDefOut)
 def update_pricing_model(pid: int, data: PricingModelDefUpdate,
                           db: Session = Depends(get_db), _=Depends(admin_only)):
-    p = db.query(models.PricingModelDef).filter(models.PricingModelDef.id == pid).first()
+    p = db.query(models.PricingModelDef).filter_by(id=pid).first()
     if not p:
         raise HTTPException(404)
     for k, v in data.model_dump(exclude_none=True).items():
@@ -275,8 +303,7 @@ def set_default_limit(data: DefaultServiceLimitUpdate,
                        db: Session = Depends(get_db), _=Depends(admin_only)):
     if data.value not in [1, 3, 5, -1]:
         raise HTTPException(400, "Must be 1, 3, 5, or -1")
-    s = db.query(models.SystemSetting).filter(
-        models.SystemSetting.key == "default_service_limit").first()
+    s = db.query(models.SystemSetting).filter_by(key="default_service_limit").first()
     if s:
         s.value = str(data.value)
     else:

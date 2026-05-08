@@ -5,7 +5,6 @@ from app.models import UserType, BookingStatus, EventStatus
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-
 class UserRegister(BaseModel):
     name: str
     email: EmailStr
@@ -40,7 +39,6 @@ class UserUpdate(BaseModel):
 
 
 # ── Admin-managed lookups ─────────────────────────────────────────────────────
-
 class CategoryDefOut(BaseModel):
     id: int
     key: str
@@ -90,7 +88,6 @@ class PricingModelDefUpdate(BaseModel):
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
-
 class EventCreate(BaseModel):
     name: str
     event_type: str
@@ -136,7 +133,6 @@ class EventOut(BaseModel):
 
 
 # ── Vendor services ───────────────────────────────────────────────────────────
-
 class VendorServiceCreate(BaseModel):
     service_name: str
     category_key: str
@@ -191,7 +187,6 @@ class VendorServiceOut(BaseModel):
 
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
-
 class LocationIn(BaseModel):
     address: Optional[str] = None
     latitude: float
@@ -238,7 +233,7 @@ class VendorOut(BaseModel):
         from_attributes = True
 
 
-# ── Multi-service budget planner ──────────────────────────────────────────────
+# ── Planner schemas ───────────────────────────────────────────────────────────
 
 class ServiceRequest(BaseModel):
     category_key: str
@@ -276,7 +271,41 @@ class BudgetPackage(BaseModel):
     total_budget: float
     savings: float
 
-# Legacy single-service match
+
+class CategoryBest(BaseModel):
+    """
+    Best available vendors for a single service category.
+    Included in PlannerResponse to give the user transparency about
+    which categories have good matches and which are problematic.
+    """
+    category_key: str
+    category_label: str
+    allocated_budget: float
+    vendors_found: int            # number fitting within budget
+    any_vendors_found: int        # number found ignoring budget
+    top_vendors: List[MatchedVendor]
+    min_price_available: Optional[float]   # cheapest option found
+    budget_shortfall: Optional[float]      # how much extra budget is needed
+
+
+class PlannerResponse(BaseModel):
+    """
+    Full response from the planner endpoint.
+
+    packages              — exact or relaxed packages (may be empty)
+    is_recommendation     — True when constraints were relaxed
+    recommendation_reason — human-readable explanation of what changed
+    recommendation_labels — short bullet-point list of relaxed constraints
+    per_category          — per-category breakdown always shown for transparency
+    """
+    packages:              List[BudgetPackage]
+    is_recommendation:     bool
+    recommendation_reason: Optional[str]
+    recommendation_labels: List[str]
+    per_category:          List[CategoryBest]
+
+
+# ── Legacy single-service match ───────────────────────────────────────────────
 class VendorMatchResult(BaseModel):
     vendor: VendorOut
     distance_km: float
@@ -293,7 +322,6 @@ class MatchQuery(BaseModel):
 
 
 # ── Bookings ──────────────────────────────────────────────────────────────────
-
 class BookingCreate(BaseModel):
     event_id: int
     vendor_id: int
@@ -321,7 +349,6 @@ class BookingStatusUpdate(BaseModel):
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
-
 class NotificationOut(BaseModel):
     id: int
     user_id: int
@@ -334,7 +361,6 @@ class NotificationOut(BaseModel):
 
 
 # ── Admin controls ────────────────────────────────────────────────────────────
-
 class AdminUserUpdate(BaseModel):
     is_active: Optional[bool] = None
 

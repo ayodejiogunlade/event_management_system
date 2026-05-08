@@ -1,42 +1,37 @@
 """
-matching.py — Optimised MCDM Vendor Matching Engine
+matching.py — High-Performance MCDM Vendor Matching Engine
+===========================================================
 
-Performance fixes applied (critical when vendor count is in the thousands):
+Performance fixes that bring search time from minutes → milliseconds:
 
-  PROBLEM 1 — N+1 query explosion
-    Old code: db.query(Vendor).all()  then accessed v.services and v.location
-    via lazy loading, firing one extra SQL query per vendor per relationship.
-    With 1,000 vendors that was 3,000+ round-trips to PostgreSQL.
+  FIX 1 — Batch availability check (biggest win)
+    Old: _is_available() fired one SQL query per vendor → 1,000 queries
+    New: _batch_conflict_ids() fires ONE query, returns a Python set.
+         Availability check becomes "if vendor_id in conflict_set" — O(1).
 
-    FIX: joinedload() fetches vendors + services + location in ONE query using
-    SQL JOINs. 3,000 queries → 1 query.
+  FIX 2 — Bounding box DB pre-filter (already applied in previous patch)
+    Eliminates vendors outside the search radius before any Python runs.
 
-  PROBLEM 2 — Full table scan of all vendors
-    Old code loaded every vendor in the database regardless of location,
-    then filtered by distance in Python.
+  FIX 3 — Candidate cap before iterproduct
+    Caps candidates at MAX_CANDIDATES_PER_CATEGORY per category so the
+    combinatorial step stays bounded.
 
-    FIX: Bounding box pre-filter at the database level.
-    Given search centre (lat, lng) and radius R km:
-      lat_delta  = R / 111.0          (1° latitude  ≈ 111 km)
-      lng_delta  = R / (111.0 × cos(lat))   (longitude degree shrinks near poles)
-    Filter WHERE location.latitude  BETWEEN (lat−delta) AND (lat+delta)
-           AND  location.longitude BETWEEN (lng−delta) AND (lng+delta)
-    This eliminates distant vendors before any Python code runs.
-    The Haversine exact check then refines the box to a circle.
+Progressive fallback when no exact results are found:
+  Level 1 — Exact:              strict radius, strict budget, check availability
+  Level 2 — Expand radius:      radius × 5 (up to 1000 km)
+  Level 3 — Relax budget:       allow each category budget × 1.35
+  Level 4 — Expand + Relax:     both above combined
+  Level 5 — Ignore date:        skip availability, show "needs confirmation"
+  Level 6 — All relaxed:        radius × 10, budget × 1.5, ignore date
 
-  PROBLEM 3 — Combinatorial explosion in iterproduct
-    With 50 candidates per category × 4 categories = 50⁴ = 6.25 million
-    combinations to evaluate. The fix caps candidates per category at 15
-    (best 15 by price fit) before combining, keeping the worst case at
-    15⁴ = 50,625 — fast enough.
-
-Result: planner now completes in <2 seconds for 1,000+ vendors.
+Per-category breakdown is always computed so the UI can show the user
+exactly which categories have vendors and which don't.
 """
 
 import math
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 from itertools import product as iterproduct
-from datetime import datetime
+from datetime import datetime, date
 
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_
@@ -46,28 +41,18 @@ from app.schemas import (
     PlannerQuery, BudgetPackage, MatchedVendor,
     MatchQuery, VendorMatchResult, VendorOut,
     LocationOut, VendorServiceOut,
+    PlannerResponse, CategoryBest,
 )
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-# 1 degree of latitude in km (constant worldwide)
-KM_PER_LAT_DEGREE = 111.0
-
-# Maximum candidates per category fed into iterproduct.
-# Keeps combination count manageable even with many vendors.
-MAX_CANDIDATES_PER_CATEGORY = 15
+KM_PER_LAT_DEGREE       = 111.0
+MAX_CANDIDATES_PER_CATEGORY = 12   # caps iterproduct; 12^5 = 248,832 max combos
 
 
-# ── Haversine distance ─────────────────────────────────────────────────────────
+# ── Haversine ──────────────────────────────────────────────────────────────────
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Compute great-circle distance in kilometres between two geographic points
-    using the Haversine formula.
-
-    Arguments use decimal degrees. Works correctly near the poles and at the
-    antimeridian (±180°) because it operates on radians.
-    """
     R  = 6371.0
     p1 = math.radians(float(lat1))
     p2 = math.radians(float(lat2))
@@ -77,42 +62,48 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-# ── Bounding box helper ────────────────────────────────────────────────────────
+# ── Bounding box ───────────────────────────────────────────────────────────────
 
 def bounding_box(lat: float, lng: float, radius_km: float):
-    """
-    Return (lat_min, lat_max, lng_min, lng_max) for a square bounding box
-    centred at (lat, lng) with side length 2 × radius_km.
-
-    Used for a fast database-level pre-filter before the exact Haversine check.
-    The box is slightly larger than the circle it encloses, so no valid vendor
-    is ever excluded — only clearly-far vendors are skipped.
-    """
     lat_delta = radius_km / KM_PER_LAT_DEGREE
-    # Longitude degrees are shorter near the equator; cos(lat) corrects for this
-    lng_delta = radius_km / (KM_PER_LAT_DEGREE * math.cos(math.radians(lat)))
-
-    return (
-        lat - lat_delta,  # lat_min
-        lat + lat_delta,  # lat_max
-        lng - lng_delta,  # lng_min
-        lng + lng_delta,  # lng_max
-    )
+    lng_delta = radius_km / (KM_PER_LAT_DEGREE * max(math.cos(math.radians(lat)), 0.01))
+    return lat - lat_delta, lat + lat_delta, lng - lng_delta, lng + lng_delta
 
 
-# ── Query helpers ──────────────────────────────────────────────────────────────
+# ── BATCH availability check ───────────────────────────────────────────────────
 
-def _base_vendor_query(db: Session, lat: float, lng: float, radius_km: float):
+def _batch_conflict_ids(db: Session, event_date: datetime) -> Set[int]:
     """
-    Return a SQLAlchemy query that:
-      1. Filters to verified + available vendors
-      2. Applies a bounding box on Location (DB-level, uses index if present)
-      3. Eagerly loads .services and .location in the same round-trip
+    Return the set of vendor_ids that already have a CONFIRMED booking on the
+    same calendar date as event_date.
 
-    This replaces the old pattern of loading all vendors then filtering in Python.
+    Fires exactly ONE SQL query regardless of how many vendors exist.
+    Replaces the old per-vendor _is_available() which fired N queries.
+    """
+    day_start = datetime.combine(event_date.date(), datetime.min.time())
+    day_end   = datetime.combine(event_date.date(), datetime.max.time())
+
+    rows = (
+        db.query(models.Booking.vendor_id)
+        .join(models.Event, models.Booking.event_id == models.Event.id)
+        .filter(
+            models.Booking.status   == models.BookingStatus.confirmed,
+            models.Event.event_date >= day_start,
+            models.Event.event_date <  day_end,
+        )
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+# ── Base vendor query ──────────────────────────────────────────────────────────
+
+def _vendor_query(db: Session, lat: float, lng: float, radius_km: float):
+    """
+    One SQL query that returns all verified, available vendors within the
+    bounding box, with services and location eagerly loaded (no N+1).
     """
     lat_min, lat_max, lng_min, lng_max = bounding_box(lat, lng, radius_km)
-
     return (
         db.query(models.Vendor)
         .join(models.Location, models.Vendor.id == models.Location.vendor_id)
@@ -123,42 +114,20 @@ def _base_vendor_query(db: Session, lat: float, lng: float, radius_km: float):
             models.Location.longitude.between(lng_min, lng_max),
         )
         .options(
-            joinedload(models.Vendor.services),   # avoids N+1 on services
-            joinedload(models.Vendor.location),   # avoids N+1 on location
-            joinedload(models.Vendor.user),       # avoids N+1 on owner name
+            joinedload(models.Vendor.services),
+            joinedload(models.Vendor.location),
+            joinedload(models.Vendor.user),
         )
     )
 
 
-def _is_available(db: Session, vendor_id: int, event_date: datetime) -> bool:
-    """
-    Return True if the vendor has no confirmed booking on the same calendar date.
-    Uses a targeted indexed query rather than loading all bookings.
-    """
-    date = event_date.date()
-    conflict = (
-        db.query(models.Booking.id)
-        .join(models.Event, models.Booking.event_id == models.Event.id)
-        .filter(
-            models.Booking.vendor_id == vendor_id,
-            models.Booking.status    == models.BookingStatus.confirmed,
-            models.Event.event_date  >= datetime.combine(date, datetime.min.time()),
-            models.Event.event_date  <  datetime.combine(date, datetime.max.time()),
-        )
-        .first()
-    )
-    return conflict is None
-
+# ── Price calculator ───────────────────────────────────────────────────────────
 
 def _effective_price(
     svc: models.VendorService,
     budget: float,
     guests: int,
 ) -> Optional[float]:
-    """
-    Return the effective price of a service given a budget and guest count.
-    Returns None if the service has no valid price configured.
-    """
     pm = svc.pricing_model_key
     if pm == "fixed_fee"  and svc.fixed_price:     return float(svc.fixed_price)
     if pm == "per_head"   and svc.price_per_head:  return float(svc.price_per_head) * guests
@@ -167,160 +136,127 @@ def _effective_price(
     return None
 
 
-def _check_extra_info(svc: models.VendorService, req_extra: Optional[dict]) -> bool:
-    """Check category-specific constraints (e.g. venue capacity ≥ attendee count)."""
-    if not req_extra or not svc.extra_info:
-        return True
-    if "min_capacity" in req_extra:
-        cap = svc.extra_info.get("capacity")
-        if cap is not None:
-            try:
-                if int(cap) < int(req_extra["min_capacity"]):
-                    return False
-            except (ValueError, TypeError):
-                pass
-    return True
-
-
 def _svc_out(s: models.VendorService) -> VendorServiceOut:
-    """Convert a VendorService ORM object to a Pydantic schema."""
     return VendorServiceOut(
         id=s.id, vendor_id=s.vendor_id, service_name=s.service_name,
         category_key=s.category_key, description=s.description,
         pricing_model_key=s.pricing_model_key,
-        fixed_price=float(s.fixed_price)     if s.fixed_price     else None,
-        price_per_head=float(s.price_per_head) if s.price_per_head else None,
+        fixed_price=float(s.fixed_price)      if s.fixed_price      else None,
+        price_per_head=float(s.price_per_head) if s.price_per_head   else None,
         min_guests=s.min_guests, percentage_rate=s.percentage_rate,
-        hourly_rate=float(s.hourly_rate)     if s.hourly_rate     else None,
+        hourly_rate=float(s.hourly_rate)      if s.hourly_rate       else None,
         min_hours=s.min_hours, deposit_percent=s.deposit_percent,
         vat_applicable=s.vat_applicable, is_active=s.is_active,
         extra_info=s.extra_info, created_at=s.created_at,
     )
 
 
-# ── Multi-service Budget Planner ───────────────────────────────────────────────
+# ── Core candidate finder ──────────────────────────────────────────────────────
 
-def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
+def _find_candidates(
+    vendors: List[models.Vendor],
+    cat_key: str,
+    cat_label: str,
+    allocated_budget: float,
+    attendee_count: int,
+    event_lat: float,
+    event_lng: float,
+    search_radius_km: float,
+    conflict_ids: Set[int],
+    budget_multiplier: float = 1.0,
+    skip_availability: bool = False,
+) -> List[MatchedVendor]:
     """
-    Multi-service vendor discovery using MCDM + Haversine.
-
-    Optimised flow:
-      1. Load category labels in one query (used for display)
-      2. For each requested service category:
-         a. Run ONE SQL query (bounding box + joinedload) to get nearby vendors
-         b. Exact Haversine check to trim box → circle
-         c. Availability check (one targeted query per candidate)
-         d. Price fit check
-         e. Sort by price, cap at MAX_CANDIDATES_PER_CATEGORY
-      3. iterproduct over capped candidate lists (stays manageable)
-      4. Filter to packages within total budget, sort by total cost, return top 8
+    Filter vendors down to candidates for a single service category.
+    Returns list sorted by price ascending.
     """
+    effective_budget = allocated_budget * budget_multiplier
+    candidates = []
 
-    # Pre-load all category labels in a single query
-    cat_map: dict = {
-        c.key: c.label
-        for c in db.query(models.ServiceCategoryDef)
-                   .filter(models.ServiceCategoryDef.is_active == True)
-                   .all()
-    }
+    for v in vendors:
+        if not v.location:
+            continue
+        if not skip_availability and v.id in conflict_ids:
+            continue
 
-    per_service_candidates: List[List[MatchedVendor]] = []
+        dist = haversine_km(
+            event_lat, event_lng,
+            float(v.location.latitude), float(v.location.longitude),
+        )
+        if dist > search_radius_km or dist > v.service_radius_km:
+            continue
 
-    for req in query.services:
-        allocated = query.total_budget * (req.budget_percent / 100.0)
-        candidates: List[MatchedVendor] = []
-
-        # Single query: bounding box + joins + eager loads
-        effective_radius = min(query.search_radius_km, 1500)  # cap at 1,500 km
-        vendors = _base_vendor_query(
-            db, query.event_lat, query.event_lng, effective_radius
-        ).all()
-
-        for v in vendors:
-            if not v.location:
+        for svc in v.services:
+            if not svc.is_active or svc.category_key != cat_key:
+                continue
+            price = _effective_price(svc, effective_budget, attendee_count)
+            if price is None or price > effective_budget:
                 continue
 
-            # Exact Haversine distance (bounding box may have included corners)
-            dist = haversine_km(
-                query.event_lat, query.event_lng,
-                float(v.location.latitude), float(v.location.longitude),
-            )
-            if dist > query.search_radius_km or dist > v.service_radius_km:
-                continue
+            candidates.append(MatchedVendor(
+                vendor_id=v.id,
+                vendor_name=v.business_name,
+                address=(
+                    v.location.address
+                    or f"{float(v.location.latitude):.4f}, {float(v.location.longitude):.4f}"
+                ),
+                service_name=svc.service_name,
+                category_key=cat_key,
+                category_label=cat_label,
+                pricing_model=svc.pricing_model_key,
+                price=round(price, 2),
+                distance_km=round(dist, 2),
+                rating=v.rating,
+                deposit_percent=svc.deposit_percent,
+                vat_applicable=svc.vat_applicable,
+                extra_info=svc.extra_info,
+            ))
+            break  # one service per vendor per category
 
-            if not _is_available(db, v.id, query.event_date):
-                continue
+    candidates.sort(key=lambda x: x.price)
+    return candidates
 
-            # Find a matching active service for the requested category
-            for svc in v.services:
-                if not svc.is_active:
-                    continue
-                if svc.category_key != req.category_key:
-                    continue
-                if not _check_extra_info(svc, req.extra_info):
-                    continue
 
-                price = _effective_price(svc, allocated, query.attendee_count)
-                if price is None or price > allocated:
-                    continue
+# ── Package assembler ──────────────────────────────────────────────────────────
 
-                candidates.append(MatchedVendor(
-                    vendor_id=v.id,
-                    vendor_name=v.business_name,
-                    address=(
-                        v.location.address
-                        or f"{float(v.location.latitude):.4f}, {float(v.location.longitude):.4f}"
-                    ),
-                    service_name=svc.service_name,
-                    category_key=req.category_key,
-                    category_label=cat_map.get(req.category_key, req.category_key),
-                    pricing_model=svc.pricing_model_key,
-                    price=round(price, 2),
-                    distance_km=round(dist, 2),
-                    rating=v.rating,
-                    deposit_percent=svc.deposit_percent,
-                    vat_applicable=svc.vat_applicable,
-                    extra_info=svc.extra_info,
-                ))
-                break  # one service match per vendor per category is enough
+def _assemble_packages(
+    per_service_candidates: List[List[MatchedVendor]],
+    total_budget: float,
+) -> List[BudgetPackage]:
+    """
+    Build vendor packages from per-category candidate lists.
+    Caps at MAX_CANDIDATES_PER_CATEGORY per category before iterproduct.
+    Returns up to 8 packages sorted by total cost ascending.
+    """
+    capped = [c[:MAX_CANDIDATES_PER_CATEGORY] for c in per_service_candidates]
 
-        # Sort by price ascending and cap to keep iterproduct manageable
-        candidates.sort(key=lambda x: x.price)
-        per_service_candidates.append(candidates[:MAX_CANDIDATES_PER_CATEGORY])
-
-    # If any category returned zero candidates, the whole planner returns nothing
-    if any(len(c) == 0 for c in per_service_candidates):
-        return []
-
-    packages: List[BudgetPackage] = []
+    packages   = []
     seen_combos: set = set()
 
-    for combo in iterproduct(*per_service_candidates):
-        # Reject combos that book the same vendor for two different services
+    for combo in iterproduct(*capped):
         vendor_ids = [m.vendor_id for m in combo]
         if len(vendor_ids) != len(set(vendor_ids)):
             continue
 
-        # Deduplicate identical vendor assignments
         key = tuple(sorted((m.vendor_id, m.category_key) for m in combo))
         if key in seen_combos:
             continue
         seen_combos.add(key)
 
         total = sum(m.price for m in combo)
-        if total > query.total_budget:
+        if total > total_budget:
             continue
 
         packages.append(BudgetPackage(
             package_number=len(packages) + 1,
             vendors=list(combo),
             total_cost=round(total, 2),
-            total_budget=query.total_budget,
-            savings=round(query.total_budget - total, 2),
+            total_budget=total_budget,
+            savings=round(total_budget - total, 2),
         ))
 
         if len(packages) >= 8:
-            break  # stop early — we have enough packages
+            break
 
     packages.sort(key=lambda p: p.total_cost)
     for i, p in enumerate(packages[:8], 1):
@@ -328,27 +264,278 @@ def plan_event(db: Session, query: PlannerQuery) -> List[BudgetPackage]:
     return packages[:8]
 
 
-# ── Legacy single-service match ────────────────────────────────────────────────
+# ── Per-category best (for the fallback UI) ────────────────────────────────────
+
+def _per_category_best(
+    db: Session,
+    query: PlannerQuery,
+    vendors: List[models.Vendor],
+    conflict_ids: Set[int],
+    cat_map: dict,
+    radius_km: float,
+    budget_multiplier: float = 1.0,
+    skip_availability: bool = False,
+) -> List[CategoryBest]:
+    """
+    For each requested service category, find the top 3 vendors regardless
+    of whether a full package is possible.  Used to populate the
+    "Closest Recommendations" section in the UI.
+    """
+    results = []
+    for req in query.services:
+        allocated     = query.total_budget * (req.budget_percent / 100.0)
+        cat_label     = cat_map.get(req.category_key, req.category_key)
+
+        # Get candidates with no budget cap to find what IS available
+        any_candidates = _find_candidates(
+            vendors=vendors,
+            cat_key=req.category_key,
+            cat_label=cat_label,
+            allocated_budget=allocated * 100,   # no budget ceiling here
+            attendee_count=query.attendee_count,
+            event_lat=query.event_lat,
+            event_lng=query.event_lng,
+            search_radius_km=radius_km,
+            conflict_ids=conflict_ids,
+            budget_multiplier=1.0,
+            skip_availability=skip_availability,
+        )
+
+        # Then get budget-fit candidates at relaxed budget
+        fit_candidates = _find_candidates(
+            vendors=vendors,
+            cat_key=req.category_key,
+            cat_label=cat_label,
+            allocated_budget=allocated,
+            attendee_count=query.attendee_count,
+            event_lat=query.event_lat,
+            event_lng=query.event_lng,
+            search_radius_km=radius_km,
+            conflict_ids=conflict_ids,
+            budget_multiplier=budget_multiplier,
+            skip_availability=skip_availability,
+        )
+
+        min_price = min((c.price for c in any_candidates), default=None)
+        shortfall = round(min_price - allocated, 2) if min_price and min_price > allocated else None
+
+        top_3 = fit_candidates[:3] or any_candidates[:3]
+
+        results.append(CategoryBest(
+            category_key=req.category_key,
+            category_label=cat_label,
+            allocated_budget=round(allocated, 2),
+            vendors_found=len(fit_candidates),
+            any_vendors_found=len(any_candidates),
+            top_vendors=top_3,
+            min_price_available=round(min_price, 2) if min_price else None,
+            budget_shortfall=shortfall,
+        ))
+
+    return results
+
+
+# ── Progressive fallback planner ───────────────────────────────────────────────
+
+def plan_event_with_fallback(db: Session, query: PlannerQuery) -> PlannerResponse:
+    """
+    Main entry point for the Find Vendors planner.
+
+    Tries increasingly relaxed search constraints until packages are found.
+    Always returns a PlannerResponse — never silently returns nothing.
+
+    Fallback levels (tried in order):
+      1. Exact           — all constraints strict
+      2. Radius × 5      — expand search area
+      3. Budget × 1.35   — allow 35% over category budget
+      4. Radius × 5 + Budget × 1.35
+      5. Ignore date     — skip availability check
+      6. All relaxed     — radius × 10, budget × 1.5, no date check
+    """
+
+    # Pre-load data used by all fallback levels ─────────────────────────────────
+    cat_map: dict = {
+        c.key: c.label
+        for c in db.query(models.ServiceCategoryDef)
+                   .filter(models.ServiceCategoryDef.is_active == True)
+                   .all()
+    }
+
+    # ONE query for all conflicts on this date (replaces N queries)
+    conflict_ids = _batch_conflict_ids(db, query.event_date)
+
+    # Define fallback levels ────────────────────────────────────────────────────
+    fallback_levels = [
+        {
+            "label":             "exact",
+            "radius_km":         query.search_radius_km,
+            "budget_multiplier": 1.0,
+            "skip_availability": False,
+            "is_recommendation": False,
+            "reason":            None,
+            "labels":            [],
+        },
+        {
+            "label":             "radius_expanded",
+            "radius_km":         min(query.search_radius_km * 5, 1000),
+            "budget_multiplier": 1.0,
+            "skip_availability": False,
+            "is_recommendation": True,
+            "reason":            (
+                f"No vendors found within {query.search_radius_km:.0f} km. "
+                f"Showing the closest matches within "
+                f"{min(query.search_radius_km * 5, 1000):.0f} km of your venue."
+            ),
+            "labels": [f"Search radius expanded to {min(query.search_radius_km * 5, 1000):.0f} km"],
+        },
+        {
+            "label":             "budget_relaxed",
+            "radius_km":         query.search_radius_km,
+            "budget_multiplier": 1.35,
+            "skip_availability": False,
+            "is_recommendation": True,
+            "reason":            (
+                "No vendors fit within your exact budget. "
+                "Showing packages that are up to 35% above each category's allocation."
+            ),
+            "labels": ["Category budgets relaxed by up to 35%"],
+        },
+        {
+            "label":             "radius_and_budget",
+            "radius_km":         min(query.search_radius_km * 5, 1000),
+            "budget_multiplier": 1.35,
+            "skip_availability": False,
+            "is_recommendation": True,
+            "reason":            (
+                f"Expanded search to {min(query.search_radius_km * 5, 1000):.0f} km "
+                "and relaxed category budgets by 35%."
+            ),
+            "labels": [
+                f"Search radius expanded to {min(query.search_radius_km * 5, 1000):.0f} km",
+                "Category budgets relaxed by 35%",
+            ],
+        },
+        {
+            "label":             "ignore_date",
+            "radius_km":         min(query.search_radius_km * 5, 1000),
+            "budget_multiplier": 1.0,
+            "skip_availability": True,
+            "is_recommendation": True,
+            "reason":            (
+                "No fully-available vendors found for your date. "
+                "Showing vendors who may have a booking on that day — "
+                "contact them to confirm availability before booking."
+            ),
+            "labels": [
+                f"Radius expanded to {min(query.search_radius_km * 5, 1000):.0f} km",
+                "Date availability not verified — confirm with vendor",
+            ],
+        },
+        {
+            "label":             "all_relaxed",
+            "radius_km":         min(query.search_radius_km * 15, 2000),
+            "budget_multiplier": 1.5,
+            "skip_availability": True,
+            "is_recommendation": True,
+            "reason":            (
+                "Very few vendors matched your criteria. "
+                "Showing the widest possible search — "
+                "all budget and distance limits have been relaxed."
+            ),
+            "labels": [
+                f"Nationwide search ({min(query.search_radius_km * 15, 2000):.0f} km radius)",
+                "Budgets relaxed by 50%",
+                "Date availability not verified",
+            ],
+        },
+    ]
+
+    # Try each fallback level ───────────────────────────────────────────────────
+    for level in fallback_levels:
+        radius_km    = level["radius_km"]
+        budget_mult  = level["budget_multiplier"]
+        skip_avail   = level["skip_availability"]
+
+        # Fetch vendors within this level's bounding box (one query)
+        vendors = _vendor_query(db, query.event_lat, query.event_lng, radius_km).all()
+
+        # Build candidate list per service category
+        per_service: List[List[MatchedVendor]] = []
+        for req in query.services:
+            allocated = query.total_budget * (req.budget_percent / 100.0)
+            cat_label = cat_map.get(req.category_key, req.category_key)
+
+            candidates = _find_candidates(
+                vendors=vendors,
+                cat_key=req.category_key,
+                cat_label=cat_label,
+                allocated_budget=allocated,
+                attendee_count=query.attendee_count,
+                event_lat=query.event_lat,
+                event_lng=query.event_lng,
+                search_radius_km=radius_km,
+                conflict_ids=conflict_ids if not skip_avail else set(),
+                budget_multiplier=budget_mult,
+                skip_availability=skip_avail,
+            )
+            per_service.append(candidates)
+
+        # Check if every category has at least one candidate
+        if all(len(c) > 0 for c in per_service):
+            packages = _assemble_packages(per_service, query.total_budget * budget_mult)
+            if packages:
+                per_cat = _per_category_best(
+                    db, query, vendors, conflict_ids, cat_map,
+                    radius_km, budget_mult, skip_avail,
+                )
+                return PlannerResponse(
+                    packages=packages,
+                    is_recommendation=level["is_recommendation"],
+                    recommendation_reason=level["reason"],
+                    recommendation_labels=level["labels"],
+                    per_category=per_cat,
+                )
+
+    # Absolute fallback — no packages possible, return per-category best only ──
+    # Use widest possible radius to give the user SOMETHING useful
+    wide_radius = 2000
+    all_vendors = _vendor_query(db, query.event_lat, query.event_lng, wide_radius).all()
+    per_cat = _per_category_best(
+        db, query, all_vendors, set(), cat_map,
+        wide_radius, budget_multiplier=2.0, skip_availability=True,
+    )
+
+    return PlannerResponse(
+        packages=[],
+        is_recommendation=True,
+        recommendation_reason=(
+            "No vendor packages could be assembled for your search. "
+            "Below are the best individual vendors available per category — "
+            "you can contact them directly to arrange a custom package."
+        ),
+        recommendation_labels=[
+            "No complete package found",
+            "Showing best individual vendors per category",
+            "Budgets and distance limits fully relaxed",
+        ],
+        per_category=per_cat,
+    )
+
+
+# ── Legacy single-service match (for /discover page) ──────────────────────────
 
 def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
     """
-    Single-category MCDM vendor matching for the /discover page.
-
-    Scoring formula:
-      S = 0.4 × S_distance + 0.3 × S_price + 0.3 × S_rating
-    where each component is normalised to [0, 1].
+    Single-category MCDM vendor matching.
+    S = 0.4 × S_distance + 0.3 × S_price + 0.3 × S_rating
     """
-    effective_radius = min(query.search_radius_km, 1500)
-    vendors = _base_vendor_query(
-        db, query.event_lat, query.event_lng, effective_radius
-    ).all()
-
+    conflict_ids = _batch_conflict_ids(db, query.event_date)
+    vendors      = _vendor_query(db, query.event_lat, query.event_lng,
+                                  min(query.search_radius_km, 1500)).all()
     results = []
     for v in vendors:
-        if not v.location:
+        if not v.location or v.id in conflict_ids:
             continue
-
-        # Find the matching service for this category
         svc = next(
             (s for s in v.services
              if s.is_active and s.category_key == query.service_category),
@@ -356,22 +543,15 @@ def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
         )
         if not svc:
             continue
-
-        # Exact distance
         dist = haversine_km(
             query.event_lat, query.event_lng,
             float(v.location.latitude), float(v.location.longitude),
         )
         if dist > query.search_radius_km or dist > v.service_radius_km:
             continue
-
-        if not _is_available(db, v.id, query.event_date):
-            continue
-
         price = _effective_price(svc, query.budget or 999_999_999, 100)
         if query.budget and price and price > query.budget:
             continue
-
         results.append((v, dist, svc, price or 0.0))
 
     if not results:
@@ -382,14 +562,13 @@ def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
 
     scored = []
     for v, dist, svc, price in results:
-        s_dist  = 1.0 - (dist  / max_dist)
-        s_price = 1.0 - (price / max_price)
-        s_rate  = v.rating / 5.0
-        score   = 0.4 * s_dist + 0.3 * s_price + 0.3 * s_rate
-
+        score = (
+            0.4 * (1.0 - dist / max_dist) +
+            0.3 * (1.0 - price / max_price) +
+            0.3 * (v.rating / 5.0)
+        )
         loc = LocationOut(
-            id=v.location.id,
-            address=v.location.address,
+            id=v.location.id, address=v.location.address,
             latitude=float(v.location.latitude),
             longitude=float(v.location.longitude),
         )
@@ -400,7 +579,7 @@ def match_vendors(db: Session, query: MatchQuery) -> List[VendorMatchResult]:
             is_verified=v.is_verified, service_limit=v.service_limit,
             user_id=v.user_id, created_at=v.created_at, location=loc,
             services=[_svc_out(s) for s in v.services if s.is_active],
-            owner_name=v.user.name  if v.user else None,
+            owner_name=v.user.name   if v.user else None,
             owner_email=v.user.email if v.user else None,
         )
         scored.append(VendorMatchResult(
